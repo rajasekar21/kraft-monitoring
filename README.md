@@ -36,6 +36,41 @@ User browser
 
 AKHQ RBAC controls the UI. Kafka ACLs remain the hard authorization boundary.
 
+## Why AKHQ Was Selected
+
+AKHQ is selected as the Kafka operations UI because it gives the right balance of operational capability, RBAC maturity, LDAP integration, and deployment simplicity for Ubuntu bare metal.
+
+| Tool | Strength | Limitation for This Use Case | Decision |
+| --- | --- | --- | --- |
+| AKHQ | Kafka UI, LDAP/RBAC, multi-cluster support, topic browsing, consumer groups, ACL visibility, Schema Registry and Kafka Connect support | Requires careful RBAC and Kafka ACL design | Selected |
+| Kafdrop | Simple read-focused Kafka UI | Limited enterprise RBAC and governance controls | Not selected for production RBAC use |
+| Kafbat UI / Kafka UI | Modern Kafka UI with broad Kafka visibility | Good option, but AKHQ configuration model is simpler for LDAP group to role mapping in this design | Alternative |
+| Burrow | Strong consumer lag health evaluation | Not a general Kafka administration or RBAC UI | Complementary only |
+| Prometheus exporters | Excellent metrics collection | No human Kafka operations UI, no LDAP/RBAC workflow | Complementary only |
+| Grafana | Excellent dashboards and alerting | Observability layer only; does not manage Kafka resources | Complementary only |
+| Cruise Control | Broker balancing and optimization | Higher operational complexity; not needed for initial monitoring/admin UI | Future large-cluster option |
+| CMAK / Kafka Manager | Historical Kafka management UI | ZooKeeper-era assumptions and weaker KRaft fit | Avoid for KRaft |
+
+Architectural reasons:
+
+- AKHQ supports LDAP-backed authentication and group-based RBAC, which matches the existing enterprise identity model.
+- AKHQ can restrict UI actions by role, topic pattern, and cluster, which supports least privilege access.
+- AKHQ works as a standalone Java service, making it suitable for Ubuntu bare metal with `systemd`.
+- AKHQ can be deployed through a versioned JAR/tar layout, which keeps upgrades and rollbacks simple.
+- AKHQ covers operational workflows beyond dashboards: topics, consumer groups, offsets, topic data, ACLs, Schema Registry, and Kafka Connect.
+- AKHQ complements Kafka ACLs instead of replacing them. The UI controls what users can attempt, while Kafka enforces what is actually allowed.
+- AKHQ avoids the heavier automation footprint of Cruise Control while still giving operators useful day-to-day Kafka visibility.
+
+Final tool positioning:
+
+```text
+AKHQ                 -> Kafka operations UI with LDAP/RBAC
+Kafka ACLs           -> broker-side authorization
+Prometheus/Grafana   -> metrics, dashboards, alerts
+Burrow or exporter   -> optional consumer lag specialization
+Cruise Control       -> optional future balancing and optimization
+```
+
 ## Ubuntu Installation Pattern
 
 Recommended server path layout:
