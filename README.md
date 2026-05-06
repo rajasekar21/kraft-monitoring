@@ -1,77 +1,128 @@
-# KRaft Monitoring: AKHQ + LDAP + Kafka ACLs on Bare Metal
+# AKHQ + LDAP + Kafka ACLs on Ubuntu Bare Metal
 
-This guide describes a production-oriented bare metal deployment pattern for using AKHQ as the Kafka operations UI, LDAP or Active Directory as the identity source, and Kafka ACLs as the broker-side authorization boundary.
+This repository contains a reference deployment layout for running AKHQ on Ubuntu bare metal servers with an existing LDAP or Active Directory setup and Kafka KRaft ACL enforcement.
 
-The intended outcome is:
+The preferred installation model is a **versioned tar/JAR deployment managed by systemd**. This keeps upgrades simple: place a new AKHQ artifact under `/opt/akhq/releases/<version>`, move the `/opt/akhq/current` symlink, and restart the service. AKHQ publishes a standalone JAR release; if your organization requires `.deb`, package the same directory layout into an internal Debian package.
 
-- Users authenticate to AKHQ with LDAP credentials.
-- LDAP groups are mapped to AKHQ RBAC groups.
-- AKHQ controls what users can see or click in the UI.
-- Kafka ACLs still enforce what Kafka actually allows.
-- Sensitive topic data is blocked or masked by default.
-- Changes are auditable and managed through configuration.
+## Repository Layout
 
-## Architecture
+```text
+configs/
+  akhq/
+    application.yml
+    akhq.env.example
+  kafka/
+    admin-client.properties
+    server-kraft-acl.properties
+  systemd/
+    akhq.service
+scripts/
+  install-akhq-tar.sh
+  upgrade-akhq-tar.sh
+  apply-kafka-acls.sh
+  validate-ldap.sh
+```
+
+## Target Architecture
 
 ```text
 User browser
-  -> HTTPS reverse proxy
-  -> AKHQ on bare metal
-  -> LDAP / Active Directory for login and group lookup
+  -> HTTPS reverse proxy or load balancer
+  -> AKHQ on Ubuntu bare metal
+  -> Existing LDAP / Active Directory for authentication and groups
   -> Kafka bootstrap servers
-  -> Kafka ACL authorizer enforces broker-side access
-
-Prometheus / Grafana
-  -> separate monitoring path for metrics and alerts
+  -> Kafka StandardAuthorizer ACLs enforce broker-side permissions
 ```
 
-Use AKHQ for human Kafka operations. Use Kafka ACLs as the mandatory security control. AKHQ RBAC is not a replacement for Kafka authorization.
+AKHQ RBAC controls the UI. Kafka ACLs remain the hard authorization boundary.
 
-## Recommended Bare Metal Layout
+## Ubuntu Installation Pattern
 
-Example hosts:
-
-| Host | Purpose |
-| --- | --- |
-| `kafka-01.example.com` | Kafka broker/controller |
-| `kafka-02.example.com` | Kafka broker/controller |
-| `kafka-03.example.com` | Kafka broker/controller |
-| `akhq-01.example.com` | AKHQ service |
-| `ldap-01.example.com` | LDAP or Active Directory |
-| `monitor-01.example.com` | Prometheus / Grafana |
-
-Example service accounts:
-
-| Account | Purpose |
-| --- | --- |
-| `cn=akhq-reader,ou=service-accounts,dc=example,dc=com` | LDAP bind account used by AKHQ to search users and groups |
-| `User:akhq_prod_viewer` | Kafka principal for read-only production access |
-| `User:akhq_prod_operator` | Kafka principal for approved operational actions |
-| `User:akhq_admin` | Kafka principal for restricted platform administration |
-
-For high-security production environments, prefer separate AKHQ instances or separate Kafka client principals per environment. Avoid one overpowered AKHQ instance connected to all clusters with a single admin principal.
-
-## LDAP Group Model
-
-Create LDAP groups that match operational responsibility, not individual users.
-
-| LDAP Group | AKHQ Group | Intended Access |
-| --- | --- | --- |
-| `kafka-prod-viewers` | `prod-viewer` | View production topics, brokers, partitions, consumer groups |
-| `kafka-prod-developers` | `prod-developer` | View approved app topics and browse approved non-sensitive data |
-| `kafka-prod-operators` | `prod-operator` | Manage consumer groups and offsets for approved apps |
-| `kafka-platform-admins` | `platform-admin` | Administer Kafka through tightly controlled access |
-| `kafka-security-auditors` | `security-auditor` | Read-only compliance and audit visibility |
-
-Recommended default:
+Recommended server path layout:
 
 ```text
-No LDAP group membership = no AKHQ access
+/opt/akhq/
+  releases/
+    0.25.1/
+      akhq.jar
+    0.26.0/
+      akhq.jar
+  current -> /opt/akhq/releases/0.26.0
+
+/etc/akhq/
+  application.yml
+  akhq.env
+  certs/
+
+/var/log/akhq/
 ```
 
-## Kafka KRaft ACL Prerequisites
+Install Java and base packages:
 
-On every Kafka node in a KRaft cluster, enable the KRaft-compatible authorizer:
+```bash
+sudo apt-get update
+sudo apt-get install -y openjdk-17-jre-headless ldap-utils curl ca-certificates
+```
+
+Install AKHQ from a downloaded release artifact:
+
+```bash
+sudo ./scripts/install-akhq-tar.sh /tmp/akhq.jar 0.26.0
+sudo install -o root -g akhq -m 0640 configs/akhq/application.yml /etc/akhq/application.yml
+sudo install -o root -g akhq -m 0640 configs/akhq/akhq.env.example /etc/akhq/akhq.env
+sudo install -o root -g root -m 0644 configs/systemd/akhq.service /etc/systemd/system/akhq.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now akhq
+```
+
+Upgrade later:
+
+```bash
+sudo ./scripts/upgrade-akhq-tar.sh /tmp/akhq-new.jar 0.27.0
+sudo systemctl status akhq
+```
+
+## Debian Package Option
+
+Use the same layout for an internal `.deb` if your operations team prefers package-based rollbacks and inventory.
+
+Suggested package contents:
+
+```text
+/opt/akhq/releases/<version>/akhq.jar
+/etc/systemd/system/akhq.service
+```
+
+Keep `/etc/akhq/application.yml` and `/etc/akhq/akhq.env` as managed configuration files, not overwritten on package upgrade. This avoids losing LDAP, Kafka, and secret settings during upgrades.
+
+## LDAP Configuration Scope
+
+This repo assumes LDAP already exists. Configure only:
+
+- LDAP URL, preferably `ldaps://`.
+- LDAP bind DN and password for AKHQ lookup.
+- User search base.
+- Group search base.
+- Group membership filter.
+- LDAP group to AKHQ group mapping.
+
+See [configs/akhq/application.yml](configs/akhq/application.yml).
+
+## RBAC Model
+
+| LDAP Group | AKHQ Group | Access |
+| --- | --- | --- |
+| `kafka-prod-viewers` | `prod-viewer` | Read-only topics, brokers, consumer groups |
+| `kafka-prod-developers` | `prod-developer` | Read approved app topics and approved non-sensitive data |
+| `kafka-prod-operators` | `prod-operator` | Consumer group and offset operations for approved apps |
+| `kafka-security-auditors` | `security-auditor` | Read-only audit and ACL visibility |
+| `kafka-platform-admins` | `platform-admin` | Restricted platform administration |
+
+Default access is `no-roles`, so unmapped LDAP users receive no AKHQ permissions.
+
+## Kafka KRaft ACL Enforcement
+
+On Kafka KRaft nodes, enable the KRaft-compatible authorizer:
 
 ```properties
 authorizer.class.name=org.apache.kafka.metadata.authorizer.StandardAuthorizer
@@ -79,413 +130,66 @@ super.users=User:kafka_admin;User:akhq_admin
 allow.everyone.if.no.acl.found=false
 ```
 
-Notes:
+See [configs/kafka/server-kraft-acl.properties](configs/kafka/server-kraft-acl.properties).
 
-- `StandardAuthorizer` stores ACLs in the KRaft metadata log.
-- Keep `allow.everyone.if.no.acl.found=false` for production.
-- Use a small, audited `super.users` list.
-- Kafka principal names are case sensitive.
-- If using mTLS, the principal is commonly derived from the certificate subject.
-- If using SASL/SCRAM or SASL/OAUTHBEARER, the principal is derived from the authenticated username or token subject.
-
-## AKHQ Installation on Bare Metal
-
-1. Create a dedicated OS user.
+Apply example ACLs after adjusting principals and topic prefixes:
 
 ```bash
-sudo useradd --system --home /opt/akhq --shell /sbin/nologin akhq
-sudo mkdir -p /opt/akhq /etc/akhq /var/log/akhq
-sudo chown -R akhq:akhq /opt/akhq /etc/akhq /var/log/akhq
+export KAFKA_HOME=/opt/kafka
+export BOOTSTRAP_SERVERS=kafka-01.example.com:9093
+export ADMIN_CONFIG=/etc/kafka/admin-client.properties
+sudo install -o root -g root -m 0600 configs/kafka/admin-client.properties /etc/kafka/admin-client.properties
+./scripts/apply-kafka-acls.sh
 ```
 
-2. Install Java 17 or the Java version required by your AKHQ release.
+## Validation
+
+Validate LDAP connectivity:
 
 ```bash
-java -version
+LDAP_URI="ldaps://ldap-01.example.com:636" \
+LDAP_BIND_DN="cn=akhq-reader,ou=service-accounts,dc=example,dc=com" \
+LDAP_USER_BASE="ou=users,dc=example,dc=com" \
+LDAP_GROUP_BASE="ou=groups,dc=example,dc=com" \
+LDAP_TEST_USER="test.user" \
+LDAP_TEST_GROUP="kafka-prod-viewers" \
+./scripts/validate-ldap.sh
 ```
 
-3. Download the AKHQ release artifact from the AKHQ GitHub releases page and place it under `/opt/akhq`.
+Validate AKHQ:
 
 ```bash
-sudo install -o akhq -g akhq -m 0644 akhq.jar /opt/akhq/akhq.jar
-```
-
-4. Store runtime configuration in `/etc/akhq/application.yml`.
-
-Do not store LDAP bind passwords or Kafka secrets directly in Git. Use environment variables, a local secret file with strict permissions, or your enterprise secret manager.
-
-## AKHQ LDAP and RBAC Configuration
-
-Sample `/etc/akhq/application.yml`:
-
-```yaml
-micronaut:
-  security:
-    enabled: true
-    token:
-      jwt:
-        signatures:
-          secret:
-            generator:
-              secret: "${AKHQ_JWT_SECRET}"
-    ldap:
-      default:
-        enabled: true
-        context:
-          server: "ldaps://ldap-01.example.com:636"
-          managerDn: "cn=akhq-reader,ou=service-accounts,dc=example,dc=com"
-          managerPassword: "${LDAP_MANAGER_PASSWORD}"
-        search:
-          base: "ou=users,dc=example,dc=com"
-          attributes:
-            - "cn"
-        groups:
-          enabled: true
-          base: "ou=groups,dc=example,dc=com"
-          filter: "member={0}"
-
-akhq:
-  connections:
-    prod-kraft:
-      properties:
-        bootstrap.servers: "kafka-01.example.com:9093,kafka-02.example.com:9093,kafka-03.example.com:9093"
-        security.protocol: SASL_SSL
-        sasl.mechanism: SCRAM-SHA-512
-        sasl.jaas.config: "org.apache.kafka.common.security.scram.ScramLoginModule required username=\"akhq_prod_operator\" password=\"${KAFKA_AKHQ_PASSWORD}\";"
-        ssl.truststore.location: "/etc/akhq/certs/kafka.truststore.jks"
-        ssl.truststore.password: "${KAFKA_TRUSTSTORE_PASSWORD}"
-
-  security:
-    default-group: no-roles
-
-    roles:
-      topic-reader:
-        - resources: [ "TOPIC" ]
-          actions: [ "READ", "READ_CONFIG" ]
-        - resources: [ "CONSUMER_GROUP" ]
-          actions: [ "READ" ]
-        - resources: [ "NODE" ]
-          actions: [ "READ" ]
-
-      topic-data-reader:
-        - resources: [ "TOPIC_DATA" ]
-          actions: [ "READ" ]
-
-      consumer-operator:
-        - resources: [ "CONSUMER_GROUP" ]
-          actions: [ "READ", "UPDATE_OFFSET", "DELETE_OFFSET" ]
-
-      topic-operator:
-        - resources: [ "TOPIC" ]
-          actions: [ "READ", "CREATE", "UPDATE", "READ_CONFIG", "ALTER_CONFIG" ]
-        - resources: [ "CONSUMER_GROUP" ]
-          actions: [ "READ", "UPDATE_OFFSET" ]
-
-      acl-reader:
-        - resources: [ "ACL" ]
-          actions: [ "READ" ]
-
-      akhq-platform-admin:
-        - resources: [ "TOPIC", "TOPIC_DATA", "CONSUMER_GROUP", "CONNECT_CLUSTER", "CONNECTOR", "SCHEMA", "NODE", "ACL" ]
-          actions: [ "READ", "CREATE", "UPDATE", "DELETE", "READ_CONFIG", "ALTER_CONFIG", "UPDATE_OFFSET", "DELETE_OFFSET" ]
-
-    groups:
-      prod-viewer:
-        - role: topic-reader
-          patterns: [ "prod\\..*" ]
-          clusters: [ "prod-kraft" ]
-
-      prod-developer:
-        - role: topic-reader
-          patterns: [ "prod\\.app\\..*" ]
-          clusters: [ "prod-kraft" ]
-        - role: topic-data-reader
-          patterns: [ "prod\\.app\\.public\\..*" ]
-          clusters: [ "prod-kraft" ]
-
-      prod-operator:
-        - role: topic-reader
-          patterns: [ "prod\\.app\\..*" ]
-          clusters: [ "prod-kraft" ]
-        - role: consumer-operator
-          patterns: [ "prod\\.app\\..*" ]
-          clusters: [ "prod-kraft" ]
-
-      security-auditor:
-        - role: topic-reader
-          patterns: [ "prod\\..*" ]
-          clusters: [ "prod-kraft" ]
-        - role: acl-reader
-          clusters: [ "prod-kraft" ]
-
-      platform-admin:
-        - role: akhq-platform-admin
-          patterns: [ ".*" ]
-          clusters: [ "prod-kraft" ]
-
-    ldap:
-      groups:
-        - name: kafka-prod-viewers
-          groups:
-            - prod-viewer
-        - name: kafka-prod-developers
-          groups:
-            - prod-developer
-        - name: kafka-prod-operators
-          groups:
-            - prod-operator
-        - name: kafka-security-auditors
-          groups:
-            - security-auditor
-        - name: kafka-platform-admins
-          groups:
-            - platform-admin
-
-    data-masking:
-      mode: json_mask_by_default
-      json-mask-by-default:
-        fields:
-          - "password"
-          - "secret"
-          - "token"
-          - "ssn"
-          - "cardNumber"
-          - "email"
-
-  topic:
-    internal-regexps:
-      - "__consumer_offsets"
-      - "_schemas"
-      - ".*\\.internal\\..*"
-
-  audit:
-    enabled: true
-    cluster-id: prod-kraft
-    topic-name: akhq.audit
-```
-
-Important:
-
-- Enable `micronaut.security.enabled`.
-- Set `akhq.security.default-group: no-roles`.
-- Set `micronaut.security.token.jwt.signatures.secret.generator.secret`; otherwise group restrictions may only be enforced in the UI path instead of the API path.
-- Keep AKHQ behind HTTPS.
-- Restrict direct network access to the AKHQ port.
-
-## Systemd Service
-
-Create `/etc/systemd/system/akhq.service`:
-
-```ini
-[Unit]
-Description=AKHQ Kafka UI
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-User=akhq
-Group=akhq
-WorkingDirectory=/opt/akhq
-EnvironmentFile=/etc/akhq/akhq.env
-ExecStart=/usr/bin/java -Dmicronaut.config.files=/etc/akhq/application.yml -jar /opt/akhq/akhq.jar
-Restart=on-failure
-RestartSec=10
-SuccessExitStatus=143
-NoNewPrivileges=true
-PrivateTmp=true
-
-[Install]
-WantedBy=multi-user.target
-```
-
-Example `/etc/akhq/akhq.env`:
-
-```bash
-AKHQ_JWT_SECRET=replace-with-strong-random-secret-at-least-256-bits
-LDAP_MANAGER_PASSWORD=replace-with-ldap-bind-password
-KAFKA_AKHQ_PASSWORD=replace-with-kafka-sasl-password
-KAFKA_TRUSTSTORE_PASSWORD=replace-with-truststore-password
-```
-
-Secure the files:
-
-```bash
-sudo chown root:akhq /etc/akhq/application.yml /etc/akhq/akhq.env
-sudo chmod 0640 /etc/akhq/application.yml /etc/akhq/akhq.env
-sudo systemctl daemon-reload
-sudo systemctl enable --now akhq
 sudo systemctl status akhq
+sudo journalctl -u akhq -f
+curl -I http://localhost:8080
 ```
 
-## Kafka ACL Implementation
+Validate access:
 
-Create a client properties file for the Kafka admin user:
+- Viewer can see approved topics but cannot browse sensitive data.
+- Developer can browse only approved topic prefixes.
+- Operator can manage approved consumer groups and offsets.
+- Auditor can view ACLs but cannot change them.
+- Platform admin can perform admin actions.
+- Removing Kafka ACLs from the AKHQ Kafka principal causes broker-side denial even if the UI allows the click.
 
-`/etc/kafka/admin-client.properties`
+## Hardening Checklist
 
-```properties
-security.protocol=SASL_SSL
-sasl.mechanism=SCRAM-SHA-512
-sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required username="kafka_admin" password="replace-me";
-ssl.truststore.location=/etc/kafka/certs/kafka.truststore.jks
-ssl.truststore.password=replace-me
-```
-
-Example ACLs for AKHQ principals:
-
-```bash
-KAFKA_HOME=/opt/kafka
-BOOTSTRAP=kafka-01.example.com:9093
-ADMIN_CONFIG=/etc/kafka/admin-client.properties
-
-$KAFKA_HOME/bin/kafka-acls.sh \
-  --bootstrap-server "$BOOTSTRAP" \
-  --command-config "$ADMIN_CONFIG" \
-  --add \
-  --allow-principal User:akhq_prod_viewer \
-  --operation Describe \
-  --topic 'prod.' \
-  --resource-pattern-type prefixed
-
-$KAFKA_HOME/bin/kafka-acls.sh \
-  --bootstrap-server "$BOOTSTRAP" \
-  --command-config "$ADMIN_CONFIG" \
-  --add \
-  --allow-principal User:akhq_prod_viewer \
-  --operation Describe \
-  --group 'prod.' \
-  --resource-pattern-type prefixed
-
-$KAFKA_HOME/bin/kafka-acls.sh \
-  --bootstrap-server "$BOOTSTRAP" \
-  --command-config "$ADMIN_CONFIG" \
-  --add \
-  --allow-principal User:akhq_prod_operator \
-  --operation Describe \
-  --operation Read \
-  --topic 'prod.app.' \
-  --resource-pattern-type prefixed
-
-$KAFKA_HOME/bin/kafka-acls.sh \
-  --bootstrap-server "$BOOTSTRAP" \
-  --command-config "$ADMIN_CONFIG" \
-  --add \
-  --allow-principal User:akhq_prod_operator \
-  --operation Describe \
-  --operation Read \
-  --group 'prod.app.' \
-  --resource-pattern-type prefixed
-
-$KAFKA_HOME/bin/kafka-acls.sh \
-  --bootstrap-server "$BOOTSTRAP" \
-  --command-config "$ADMIN_CONFIG" \
-  --add \
-  --allow-principal User:akhq_admin \
-  --operation All \
-  --cluster
-```
-
-Review ACLs:
-
-```bash
-$KAFKA_HOME/bin/kafka-acls.sh \
-  --bootstrap-server "$BOOTSTRAP" \
-  --command-config "$ADMIN_CONFIG" \
-  --list
-```
-
-## Access Matrix
-
-| Action | Viewer | Developer | Operator | Security Auditor | Platform Admin |
-| --- | --- | --- | --- | --- | --- |
-| View topics | Yes | Yes | Yes | Yes | Yes |
-| View consumer groups | Yes | Yes | Yes | Yes | Yes |
-| Browse topic data | No | Approved prefixes only | Approved prefixes only | No | Yes |
-| Reset consumer offsets | No | No | Approved groups only | No | Yes |
-| Create topics | No | No | Optional, restricted | No | Yes |
-| Delete topics | No | No | No | No | Yes |
-| Alter topic configs | No | No | Optional, restricted | No | Yes |
-| View ACLs | No | No | No | Yes | Yes |
-| Change ACLs | No | No | No | No | Yes |
-
-## Validation Steps
-
-1. Validate LDAP login.
-
-```bash
-ldapsearch -H ldaps://ldap-01.example.com:636 \
-  -D "cn=akhq-reader,ou=service-accounts,dc=example,dc=com" \
-  -W \
-  -b "ou=users,dc=example,dc=com" "(cn=test.user)"
-```
-
-2. Validate LDAP group lookup.
-
-```bash
-ldapsearch -H ldaps://ldap-01.example.com:636 \
-  -D "cn=akhq-reader,ou=service-accounts,dc=example,dc=com" \
-  -W \
-  -b "ou=groups,dc=example,dc=com" "(cn=kafka-prod-viewers)"
-```
-
-3. Login to AKHQ as a viewer.
-
-Expected:
-
-- Can see allowed production topics.
-- Cannot browse sensitive topic data.
-- Cannot create, delete, or alter topics.
-
-4. Login to AKHQ as an operator.
-
-Expected:
-
-- Can see approved app topics.
-- Can manage approved consumer groups.
-- Cannot change ACLs.
-- Cannot delete production topics.
-
-5. Test broker-side denial.
-
-Temporarily remove a Kafka ACL from the AKHQ service principal and retry the same UI action. The UI action should fail because Kafka rejects it.
-
-6. Confirm audit events.
-
-```bash
-$KAFKA_HOME/bin/kafka-console-consumer.sh \
-  --bootstrap-server "$BOOTSTRAP" \
-  --consumer.config "$ADMIN_CONFIG" \
-  --topic akhq.audit \
-  --from-beginning
-```
-
-## Operational Hardening
-
-- Put AKHQ behind an HTTPS reverse proxy.
-- Allow inbound AKHQ traffic only from corporate networks or VPN.
-- Allow AKHQ outbound traffic only to LDAP, Kafka, Schema Registry, Kafka Connect, and audit destinations.
-- Use LDAPS, not plain LDAP.
-- Use SASL_SSL or mTLS for Kafka access.
-- Rotate LDAP bind and Kafka service account credentials.
-- Keep topic data browsing disabled by default.
-- Mask PII and secrets in message payloads.
-- Require pull requests for AKHQ RBAC configuration changes.
-- Keep production and non-production AKHQ deployments separate.
-- Alert on failed AKHQ logins, Kafka authorization failures, and ACL changes.
-
-## Troubleshooting
-
-| Symptom | Likely Cause | Fix |
-| --- | --- | --- |
-| All users have admin access | Security disabled or default group is `admin` | Set `micronaut.security.enabled=true` and `akhq.security.default-group=no-roles` |
-| UI hides actions but API still allows them | Missing AKHQ JWT secret | Set `micronaut.security.token.jwt.signatures.secret.generator.secret` |
-| User logs in but sees nothing | LDAP group not mapped to AKHQ group | Check `akhq.security.ldap.groups` and LDAP group names |
-| AKHQ shows topic but action fails | Kafka ACL denies service principal | Add or correct Kafka ACLs |
-| Topic data is visible unexpectedly | Broad `TOPIC_DATA` role or pattern | Narrow patterns and enable masking |
-| ACL changes fail in AKHQ | AKHQ principal lacks cluster `Alter` ACL | Grant only to admin principal, or keep ACL changes outside AKHQ |
+- Use LDAPS.
+- Use SASL_SSL or mTLS for Kafka.
+- Keep `akhq.security.default-group: no-roles`.
+- Keep `allow.everyone.if.no.acl.found=false`.
+- Store secrets in `/etc/akhq/akhq.env` or a secret manager, never in Git.
+- Restrict `/etc/akhq/akhq.env` to `0640`.
+- Put AKHQ behind HTTPS.
+- Restrict direct access to port `8080`.
+- Separate production and non-production AKHQ instances where possible.
+- Block or mask sensitive topic payload fields by default.
+- Audit AKHQ actions to a Kafka audit topic.
 
 ## References
 
+- AKHQ installation documentation: https://akhq.io/docs/installation.html
 - AKHQ authentication documentation: https://akhq.io/docs/configuration/authentifications/
 - AKHQ LDAP documentation: https://akhq.io/docs/configuration/authentifications/ldap.html
 - AKHQ groups and roles documentation: https://akhq.io/docs/configuration/authentifications/groups.html

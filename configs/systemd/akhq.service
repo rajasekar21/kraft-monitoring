@@ -1,0 +1,19 @@
+[Unit]
+Description=AKHQ Kafka UI
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=akhq
+Group=akhq
+WorkingDirectory=/opt/akhq/current
+EnvironmentFile=/etc/akhq/akhq.env
+ExecStart=/usr/bin/java -Dmicronaut.config.files=/etc/akhq/application.yml -jar /opt/akhq/current/akhq.jar
+Restart=on-failure
+RestartSec=10
+SuccessExitStatus=143
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

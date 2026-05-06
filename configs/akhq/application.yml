@@ -1,0 +1,138 @@
+micronaut:
+  server:
+    port: 8080
+  security:
+    enabled: true
+    token:
+      jwt:
+        signatures:
+          secret:
+            generator:
+              secret: "${AKHQ_JWT_SECRET}"
+    ldap:
+      default:
+        enabled: true
+        context:
+          server: "${LDAP_URI:`ldaps://ldap-01.example.com:636`}"
+          managerDn: "${LDAP_MANAGER_DN:`cn=akhq-reader,ou=service-accounts,dc=example,dc=com`}"
+          managerPassword: "${LDAP_MANAGER_PASSWORD}"
+        search:
+          base: "${LDAP_USER_BASE:`ou=users,dc=example,dc=com`}"
+          filter: "${LDAP_USER_FILTER:`uid={0}`}"
+        groups:
+          enabled: true
+          base: "${LDAP_GROUP_BASE:`ou=groups,dc=example,dc=com`}"
+          filter: "${LDAP_GROUP_FILTER:`member={0}`}"
+
+akhq:
+  connections:
+    prod-kraft:
+      properties:
+        bootstrap.servers: "${KAFKA_BOOTSTRAP_SERVERS:`kafka-01.example.com:9093,kafka-02.example.com:9093,kafka-03.example.com:9093`}"
+        security.protocol: SASL_SSL
+        sasl.mechanism: SCRAM-SHA-512
+        sasl.jaas.config: "org.apache.kafka.common.security.scram.ScramLoginModule required username=\"${KAFKA_AKHQ_USERNAME}\" password=\"${KAFKA_AKHQ_PASSWORD}\";"
+        ssl.truststore.location: "${KAFKA_TRUSTSTORE_LOCATION:`/etc/akhq/certs/kafka.truststore.jks`}"
+        ssl.truststore.password: "${KAFKA_TRUSTSTORE_PASSWORD}"
+
+  security:
+    default-group: no-roles
+
+    roles:
+      topic-reader:
+        - resources: [ "TOPIC" ]
+          actions: [ "READ", "READ_CONFIG" ]
+        - resources: [ "CONSUMER_GROUP" ]
+          actions: [ "READ" ]
+        - resources: [ "NODE" ]
+          actions: [ "READ" ]
+
+      topic-data-reader:
+        - resources: [ "TOPIC_DATA" ]
+          actions: [ "READ" ]
+
+      consumer-operator:
+        - resources: [ "CONSUMER_GROUP" ]
+          actions: [ "READ", "UPDATE_OFFSET", "DELETE_OFFSET" ]
+
+      acl-reader:
+        - resources: [ "ACL" ]
+          actions: [ "READ" ]
+
+      akhq-platform-admin:
+        - resources: [ "TOPIC", "TOPIC_DATA", "CONSUMER_GROUP", "CONNECT_CLUSTER", "CONNECTOR", "SCHEMA", "NODE", "ACL" ]
+          actions: [ "READ", "CREATE", "UPDATE", "DELETE", "READ_CONFIG", "ALTER_CONFIG", "UPDATE_OFFSET", "DELETE_OFFSET" ]
+
+    groups:
+      prod-viewer:
+        - role: topic-reader
+          patterns: [ "prod\\..*" ]
+          clusters: [ "prod-kraft" ]
+
+      prod-developer:
+        - role: topic-reader
+          patterns: [ "prod\\.app\\..*" ]
+          clusters: [ "prod-kraft" ]
+        - role: topic-data-reader
+          patterns: [ "prod\\.app\\.public\\..*" ]
+          clusters: [ "prod-kraft" ]
+
+      prod-operator:
+        - role: topic-reader
+          patterns: [ "prod\\.app\\..*" ]
+          clusters: [ "prod-kraft" ]
+        - role: consumer-operator
+          patterns: [ "prod\\.app\\..*" ]
+          clusters: [ "prod-kraft" ]
+
+      security-auditor:
+        - role: topic-reader
+          patterns: [ "prod\\..*" ]
+          clusters: [ "prod-kraft" ]
+        - role: acl-reader
+          clusters: [ "prod-kraft" ]
+
+      platform-admin:
+        - role: akhq-platform-admin
+          patterns: [ ".*" ]
+          clusters: [ "prod-kraft" ]
+
+    ldap:
+      groups:
+        - name: kafka-prod-viewers
+          groups:
+            - prod-viewer
+        - name: kafka-prod-developers
+          groups:
+            - prod-developer
+        - name: kafka-prod-operators
+          groups:
+            - prod-operator
+        - name: kafka-security-auditors
+          groups:
+            - security-auditor
+        - name: kafka-platform-admins
+          groups:
+            - platform-admin
+
+    data-masking:
+      mode: json_mask_by_default
+      json-mask-by-default:
+        fields:
+          - password
+          - secret
+          - token
+          - ssn
+          - cardNumber
+          - email
+
+  topic:
+    internal-regexps:
+      - "__consumer_offsets"
+      - "_schemas"
+      - ".*\\.internal\\..*"
+
+  audit:
+    enabled: true
+    cluster-id: prod-kraft
+    topic-name: akhq.audit
